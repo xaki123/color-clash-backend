@@ -60,6 +60,7 @@ type Room struct {
 	winnerFound chan []byte
 	winnerBroadcasted chan struct{}
 
+	startTime time.Time
 	timeLeft int
 
 	grid_size int
@@ -91,12 +92,16 @@ type Room struct {
 
 func newRoom(h *Hub) *Room{
 	ctx,cancel := context.WithCancel(context.Background())
+
+    now := time.Now()
+    startTime := now.Truncate(time.Second)
 	
 	room := &Room{
 		players: make(map[string]*Player),
 		grids: []*Grid{},
 		grids_count: map[string]int{"red":1,"yellow":1,"green":1,"blue":1,"pink":1,"orange":1,"grey":1},
 		timeLeft: 30,
+		startTime: startTime,
 		winnerFound: make(chan []byte),
 		winnerBroadcasted: make(chan struct{}),
 		threadMethodsStopped: make(chan struct{}),
@@ -121,13 +126,23 @@ func newRoom(h *Hub) *Room{
 	for x := 0; x < room.width/room.grid_size; x++ {
 		for y := 0; y < room.height/room.grid_size; y++{
 			room.grids_mu.Lock()
-			room.grids = append(room.grids,&Grid{X:x*room.grid_size,Y:y*room.grid_size,Color:"white",dissapearTime:time.Second*2})
+			room.grids = append(room.grids,&Grid{X:x*room.grid_size,Y:y*room.grid_size,Color:"white",dissapearTime:time.Second*4})
 			room.grids_mu.Unlock()
 		}
 	}
 
 	return room
 }
+
+func (r *Room) getCurrentTimeLeft() int {
+        elapsed := time.Since(r.startTime)
+        remaining := 30 - int(elapsed.Seconds())
+        if remaining < 0 {
+                return 0
+        }
+        return remaining
+}
+
 func (r *Room) ticker() {
     ticker := time.NewTicker(time.Millisecond * 15)
     defer ticker.Stop()
@@ -196,7 +211,7 @@ func (r *Room) getWinner() {
     var err error
     if !tie {
         message, err = EventJSON("winner", 
-            fmt.Sprintf("the winner is %s with %d points", maxCountsOwner, maxCount-1))
+            fmt.Sprintf("the winner is %s with %d points", maxCountsOwner, maxCount))
     } else {
         message, err = EventJSON("winner", "nobody wins, it's a tie")
     }
@@ -229,8 +244,19 @@ func (r *Room) run() {
 
 		case <-timer.C:
 			r.time_left_mu.Lock()
-			r.timeLeft -= 1
-			r.time_left_mu.Unlock()
+            r.timeLeft = r.getCurrentTimeLeft()
+            r.time_left_mu.Unlock()
+
+            timerUpdate, err := EventJSON("timer_update", map[string]interface{}{
+                    "time_left": r.timeLeft,
+            })
+
+            if err == nil {
+            	go func(){
+
+                    r.broadcast <- timerUpdate
+                }()
+            }
 
 		case <-game_end_ticker.C:
 			game_end_ticker.Stop()		
@@ -321,7 +347,7 @@ func newPlayer(c *Client, r *Room, color string, x int) *Player {
 		speed: r.grid_size,
 		joinedRoom: make(chan struct{}),
 		room: r,
-		Points: 0,
+		Points: 1,
 	}
 }
 
@@ -464,9 +490,8 @@ func (e Event) createRoom(c *Client) {
 
 	log.Println("[create_room] user joined the room")
 
-	room.time_left_mu.RLock()
-	message,err := EventJSON("get_token",map[string]interface{}{"room_id":room.id,"my_id":c.id,"canvas_width":room.width,"canvas_height":room.height,"time_left":room.timeLeft,"grid_size":room.grid_size})
-	room.time_left_mu.RUnlock()
+	currentTimeLeft := room.getCurrentTimeLeft()
+	message,err := EventJSON("get_token",map[string]interface{}{"room_id":room.id,"my_id":c.id,"canvas_width":room.width,"canvas_height":room.height,"time_left":currentTimeLeft,"grid_size":room.grid_size})
 
 	if err != nil {
 		log.Println("error sending marshaling json: ",err)
@@ -518,9 +543,8 @@ func (e Event) joinRoom(c *Client) {
 
 		log.Println("[joinRoom] player joined the room: ",room.id)
 
-		room.time_left_mu.RLock()
-		message,err := EventJSON("get_token",map[string]interface{}{"room_id":room.id,"my_id":c.id,"canvas_width":room.width,"canvas_height":room.height,"time_left":room.timeLeft,"grid_size":room.grid_size})
-		room.time_left_mu.RUnlock()
+		currentTimeLeft := room.getCurrentTimeLeft()
+		message,err := EventJSON("get_token",map[string]interface{}{"room_id":room.id,"my_id":c.id,"canvas_width":room.width,"canvas_height":room.height,"time_left":currentTimeLeft,"grid_size":room.grid_size})
 
 		if err != nil {
 			log.Println("error sending marshaling json: ",err)
